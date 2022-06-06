@@ -1,3 +1,4 @@
 cir
 *.tif
 .env
+*.geojson

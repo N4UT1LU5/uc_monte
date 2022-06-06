@@ -1,3 +1,5 @@
+import time
+import rich
 import re
 import rasterio
 from rasterio import features
@@ -8,10 +10,9 @@ import cv2
 
 import geopandas
 
+from rich.console import Console
 
-# import xarray
-
-# https://gis.stackexchange.com/questions/138914/calculating-ndvi-with-rasterio
+console = Console()
 
 INPUT_PATH = "./input/"
 OUTPUT_PATH = "./output/"
@@ -40,27 +41,33 @@ def raster_to_shape(path_to_file):
     """
     with rasterio.open(path_to_file) as img:
         np_array = img.read(1).astype(numpy.int16)
-    shapes = []
-    shapes.extend(
-        list(features.shapes(np_array, mask=(np_array == 1), transform=img.transform))
-    )
-    # convert json dict into geodataframe
-    shapejson = (
-        {"type": "Feature", "properties": {}, "geometry": s}
-        for i, (s, v) in enumerate(shapes)
-    )
-    collection = {"type": "FeatureCollection", "features": list(shapejson)}
-    veg_gdf = geopandas.GeoDataFrame.from_features(collection["features"])
+    with console.status("[bold green]creating shape from raster...") as status:
+        shapes = []
+        shapes.extend(
+            list(
+                features.shapes(np_array, mask=(np_array == 1), transform=img.transform)
+            )
+        )
+        # convert json dict into geodataframe
+        shapejson = (
+            {"type": "Feature", "properties": {}, "geometry": s}
+            for i, (s, v) in enumerate(shapes)
+        )
+        collection = {"type": "FeatureCollection", "features": list(shapejson)}
+        veg_gdf = geopandas.GeoDataFrame.from_features(collection["features"])
 
-    veg_gdf = veg_gdf.dissolve().explode(index_parts=True)
-    veg_gdf.set_crs("epsg:25832")
-    result_gdf = veg_gdf
-    # result_gdf = geopandas.GeoDataFrame(geometry=veg_gdf.buffer(5, 4).buffer(-5, 4))
-    result_gdf = geopandas.GeoDataFrame(geometry=veg_gdf.buffer(-0.5, 4).buffer(0.5, 4))
-    # result_gdf = veg_gdf.simplify(1)
-    result_gdf.to_file(
-        os.path.join(OUTPUT_PATH, "mask_shape.geojson"), driver="GeoJSON"
-    )
+    with console.status("[green]Cleanup shapes...") as status:
+        veg_gdf = veg_gdf.dissolve().explode(index_parts=True)
+        veg_gdf.set_crs("epsg:25832")
+        result_gdf = veg_gdf
+        # result_gdf = geopandas.GeoDataFrame(geometry=veg_gdf.buffer(5, 4).buffer(-5, 4))
+        result_gdf = geopandas.GeoDataFrame(
+            geometry=veg_gdf.buffer(-0.5, 4).buffer(0.5, 4)
+        )
+        # result_gdf = veg_gdf.simplify(1)
+        out_p = os.path.join(OUTPUT_PATH, "mask_shape.geojson")
+    result_gdf.to_file(out_p, driver="GeoJSON")
+    console.log(f"sucsessfully created GeoJSON Shape: {out_p}")
 
 
 def morph_img(img, kernel_pxSize):
@@ -78,6 +85,7 @@ def morph_img(img, kernel_pxSize):
     return img
 
 
+# test. not in use
 def opening_img(path_to_file, kernel_pxSize):
     # https://www.geeksforgeeks.org/erosion-dilation-images-using-opencv-python/
     with rasterio.open(path_to_file, "r+") as dst:
@@ -97,52 +105,61 @@ def opening_img(path_to_file, kernel_pxSize):
         dst2.write_band(1, img)
 
 
-def ndvi_mask(threshold, img_dict):
+def ndvi_mask(threshold):
     """
     create tiff mask of ndvi threshold
     """
+    # https://gis.stackexchange.com/questions/138914/calculating-ndvi-with-rasterio
+
+    console.log(f"[yellow]Start process: Vegetation mask")
     veg_list = []
-    a = ""
+    cnt = 1
+    img_dict = load_tiff(INPUT_PATH)
     for key in img_dict:
-        a = key
-        bandNIR = img_dict[key].read(1)
-        bandRed = img_dict[key].read(2)
+        with console.status(
+            f"[green]Calculating NDVI for {img_dict[key].name} - {cnt} of {len(img_dict)}"
+        ) as status:
+            bandNIR = img_dict[key].read(1)
+            bandRed = img_dict[key].read(2)
 
-        kwargs = img_dict[key].meta
-        kwargs.update(dtype=rasterio.float32, count=1, compress="lzw")
+            kwargs = img_dict[key].meta
+            kwargs.update(dtype=rasterio.float32, count=1, compress="lzw")
 
-        ndvi = numpy.zeros(img_dict[key].shape, dtype=numpy.float16)
-        veg = numpy.zeros(img_dict[key].shape, dtype=numpy.int16)
-        ndvi = (bandNIR.astype(numpy.float16) - bandRed.astype(numpy.float16)) / (
-            bandNIR.astype(numpy.float16) + bandRed.astype(numpy.float16)
-        )
+            ndvi = numpy.zeros(img_dict[key].shape, dtype=numpy.float16)
+            veg = numpy.zeros(img_dict[key].shape, dtype=numpy.int16)
+            ndvi = (bandNIR.astype(numpy.float16) - bandRed.astype(numpy.float16)) / (
+                bandNIR.astype(numpy.float16) + bandRed.astype(numpy.float16)
+            )
 
-        with rasterio.open(
-            os.path.join(OUTPUT_PATH, "ndvi", f"ndvi_{key}.tif"), "w", **kwargs
-        ) as dst:
-            dst.write_band(1, ndvi.astype(numpy.float16))
+            with rasterio.open(
+                os.path.join(OUTPUT_PATH, "ndvi", f"ndvi_{key}.tif"), "w", **kwargs
+            ) as dst:
+                dst.write_band(1, ndvi.astype(numpy.float16))
 
-        max_v = numpy.nanmax(ndvi)
-        print(f"{key} max {max_v}")
-        veg = ndvi
-        veg[veg > threshold] = 1.0
-        veg[veg <= threshold] = 0.0
-        veg = veg.astype(numpy.byte)
-        veg_list.append(veg)
-        veg = morph_img(veg, KERNEL_SIZE)
+        # max_v = numpy.nanmax(ndvi)
+        # print(f"{key} max {max_v}")
+        with console.status(
+            f"[green]Creating Vegetation mask for {img_dict[key].name} - {cnt} of {len(img_dict)}"
+        ) as status:
+            veg = ndvi
+            veg[veg > threshold] = 1.0
+            veg[veg <= threshold] = 0.0
+            veg = veg.astype(numpy.byte)
+            veg_list.append(veg)
+            veg = morph_img(veg, KERNEL_SIZE)
 
-        print("checkpoint")
-
-        with rasterio.open(
-            os.path.join(OUTPUT_PATH, "veg", f"veg_{key}.tif"), "w", **kwargs
-        ) as dst:
-            dst.write_band(1, veg.astype(numpy.int8))
-        print(f"done mask {key}")
-
+            out_filename = os.path.join(OUTPUT_PATH, "veg", f"veg_{key}.tif")
+            with rasterio.open(out_filename, "w", **kwargs) as dst:
+                dst.write_band(1, veg.astype(numpy.int8))
+        console.log(f"Successfuly created mask: {out_filename}")
+        cnt += 1
     img_dict[key].close()
+    console.log(f"[yellow]Finished process: Vegetation mask")
 
 
 def calc_succession():
+    time.sleep(1)
+    console.log(f"[yellow]Start process: Succession mask")
     path_dict = {}
     veg_path = os.path.join(OUTPUT_PATH, "veg")
     for f in os.listdir(veg_path):
@@ -157,56 +174,64 @@ def calc_succession():
 
     i = 0
     while i < (len(path_dict) - 1):
-        print(i)
         if i == 0:
-            path_1 = list(path_dict.values())[0]
-            path_2 = list(path_dict.values())[1]
-            print(f"p1: {path_1}, p2: {path_2}")
-            with rioxarray.open_rasterio(
-                path_1, masked=True
-            ) as xds, rioxarray.open_rasterio(path_2, masked=True) as xds_match:
-                xds_repr_match = xds.rio.reproject_match(xds_match)
-                xds_diff = xds_repr_match - xds_match
-            print("subrtraction complete")
-            # xds_repr_match.close()
-            xds_diff.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
-            # print(xds_diff)
-            xds = xds_match = xds_diff = xds_repr_match = None
-            print(f"closed {xds} and {xds_match}")
-            with rasterio.open(DIFF_OUTPUT, "r+") as dst:
-                ras = dst.read(1)
-                ras[ras > 0] = 0
-                ras[ras < 0] = 1
-                dst.write_band(1, ras.astype(numpy.int8))
+            with console.status(
+                f"[green]Calculating base vegetation difference between [pink]{list(path_dict.values())[0]} (base layer) [green]and [pink]{list(path_dict.values())[1]}..."
+            ) as status:
+                path_1 = list(path_dict.values())[0]
+                path_2 = list(path_dict.values())[1]
+                # print(f"p1: {path_1}, p2: {path_2}")
+                with rioxarray.open_rasterio(
+                    path_1, masked=True
+                ) as xds, rioxarray.open_rasterio(path_2, masked=True) as xds_match:
+                    xds_repr_match = xds.rio.reproject_match(xds_match)
+                    xds_diff = xds_repr_match - xds_match
+                # xds_repr_match.close()
+                xds_diff.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
+                # print(xds_diff)
+                xds = xds_match = xds_diff = xds_repr_match = None
+                # print(f"closed {xds} and {xds_match}")
+                with rasterio.open(DIFF_OUTPUT, "r+") as dst:
+                    ras = dst.read(1)
+                    ras[ras > 0] = 0
+                    ras[ras < 0] = 1
+                    dst.write_band(1, ras.astype(numpy.int8))
         else:
-            with rioxarray.open_rasterio(
-                DIFF_OUTPUT, masked=True
-            ) as xds, rioxarray.open_rasterio(
-                list(path_dict.values())[i + 1], masked=True
-            ) as xds_match:
-                xds_repr_match = xds.rio.reproject_match(xds_match)
+            with console.status(
+                f"[green]Calculating subsequent overlap {i} of {len(path_dict)-1}..."
+            ) as status:
+                with rioxarray.open_rasterio(
+                    DIFF_OUTPUT, masked=True
+                ) as xds, rioxarray.open_rasterio(
+                    list(path_dict.values())[i + 1], masked=True
+                ) as xds_match:
+                    xds_repr_match = xds.rio.reproject_match(xds_match)
 
-                xds_match += xds_repr_match
-                # print(xds_match)
-                xds_match.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
+                    xds_match += xds_repr_match
+                    # print(xds_match)
+                    xds_match.rio.to_raster(
+                        DIFF_OUTPUT, dtype=numpy.int8, compress="lzw"
+                    )
 
-            # print(f"closed {xds} and {xds_match}")
-
-            # xds_repr_match.close()
-            with rasterio.open(DIFF_OUTPUT, "r+") as dst:
-                ras = dst.read(1)
-                print(ras.max())
-                ras[ras < 2] = 0
-                ras[ras == 2] = 1
-                ras = morph_img(ras, KERNEL_SIZE)
-                dst.write_band(1, ras.astype(numpy.int8))
-        i += 1
+                with rasterio.open(DIFF_OUTPUT, "r+") as dst:
+                    ras = dst.read(1)
+                    print(ras.max())
+                    ras[ras < 2] = 0
+                    ras[ras == 2] = 1
+                    ras = morph_img(ras, KERNEL_SIZE)
+                    dst.write_band(1, ras.astype(numpy.int8))
+            i += 1
+    console.log(f"[yellow]Finished process: Succession mask")
 
 
 if __name__ == "__main__":
-    # tiffs = load_tiff(INPUT_PATH)
-    # ndvi_mask(NDVI_THRESHOLD, tiffs)
-    # calc_succession()
-    raster_to_shape(DIFF_OUTPUT)
+    console.log("[blue bold]>>--<Program Start>--<<")
+    T_start = time.time()
+
+    # ndvi_mask(NDVI_THRESHOLD)
+    calc_succession()
+    # raster_to_shape(DIFF_OUTPUT)
     # opening_img(DIFF_OUTPUT, 10)
+    T_end = time.time()
+
     pass

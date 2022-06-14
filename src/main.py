@@ -1,6 +1,4 @@
-from cmath import isnan
 import time
-import rich
 import re
 import rasterio
 from rasterio import features
@@ -12,7 +10,6 @@ import cv2
 import gc
 from memory_profiler import profile
 
-
 import geopandas
 
 from rich.console import Console
@@ -21,9 +18,10 @@ console = Console()
 
 INPUT_PATH = "./input/"
 OUTPUT_PATH = "./output/"
+OUTPUT_PATH_VEG = OUTPUT_PATH + "veg"
 DIFF_OUTPUT = OUTPUT_PATH + "veg_diff.tif"
 
-NDVI_THRESHOLD = 0.4
+NDVI_THRESHOLD = 0.3
 KERNEL_SIZE = 2
 GSD = 1.0  # 1m/px
 numpy.seterr(divide="ignore", invalid="ignore")
@@ -35,7 +33,7 @@ def load_tiff(input_path):
         if os.path.isfile(os.path.join(input_path, f)):
             path_file = os.path.join(input_path, f)
             year = int(re.search(r"\d+", f).group())
-            dict_of_imgs.update({year: rasterio.open(path_file)})
+            dict_of_imgs.update({year: path_file})
     # sort images by year
     dict_of_imgs = dict(sorted(dict_of_imgs.items()))
     return dict_of_imgs
@@ -51,7 +49,7 @@ def raster_to_shape(path_to_file):
         shapes = []
         shapes.extend(
             list(
-                features.shapes(np_array, mask=(np_array == 1), transform=img.transform)
+                features.shapes(np_array, mask=(np_array >= 1), transform=img.transform)
             )
         )
         # convert json dict into geodataframe
@@ -66,7 +64,6 @@ def raster_to_shape(path_to_file):
         veg_gdf = veg_gdf.dissolve().explode(index_parts=True)
         veg_gdf.set_crs("epsg:25832")
         result_gdf = veg_gdf
-        # result_gdf = geopandas.GeoDataFrame(geometry=veg_gdf.buffer(5, 4).buffer(-5, 4))
         result_gdf = geopandas.GeoDataFrame(
             geometry=veg_gdf.buffer(-0.5, 4).buffer(0.5, 4)
         )
@@ -115,24 +112,28 @@ def opening_img(path_to_file, kernel_pxSize):
 
 
 # @profile
-def ndvi_mask(threshold, gsd=0.5):
+def creat_veg_raster(threshold=0.5, gsd=0.5):
     """
     create tiff mask of ndvi threshold
     """
     # https://gis.stackexchange.com/questions/138914/calculating-ndvi-with-rasterio
 
     console.log(f"[yellow]Start process: Vegetation mask")
-    veg_list = []
     cnt = 1
     img_dict = load_tiff(INPUT_PATH)
     for key in img_dict:
-        dataset = img_dict[key]
-        gsd_y, gsd_x = img_dict[key].res  # get GSD
+        dataset = rasterio.open(img_dict[key])
+        gsd_y, gsd_x = dataset.res  # get GSD
+        if gsd < gsd_x:
+            gsd = gsd_x
+            console.log(
+                f"Selected GSD smaller than GSD of input file. Reset GSD to Input: {gsd}"
+            )
         # console.log(gsd_y, gsd_x)
         with console.status(
             f"[green]Calculating NDVI for {dataset.name} - {cnt} of {len(img_dict)}"
         ) as status:
-            scale = 1 / (1 / gsd_x * gsd)
+            scale = 1 / (gsd / gsd_x)
             data = dataset.read(
                 out_shape=(
                     dataset.count,
@@ -169,77 +170,65 @@ def ndvi_mask(threshold, gsd=0.5):
                 dst.write_band(1, ndvi)
 
         with console.status(
-            f"[green]Creating Vegetation mask for {img_dict[key].name} - {cnt} of {len(img_dict)}"
+            f"[green]Creating Vegetation mask for {dataset.name} - {cnt} of {len(img_dict)}"
         ) as status:
             veg = ndvi
             veg[veg > threshold] = 1.0
             veg[veg <= threshold] = 0.0
 
             veg = veg.astype(numpy.byte)
-            veg_list.append(veg)
             veg = morph_img(veg, 1 / gsd)
             if cnt == 1:
                 veg = numpy.logical_not(veg)
                 pass
-            out_filename = os.path.join(OUTPUT_PATH, "veg", f"veg_{key}.tif")
+            out_filename = os.path.join(OUTPUT_PATH_VEG, f"veg_{key}.tif")
             with rasterio.open(out_filename, "w", **kwargs) as dst:
                 dst.write_band(1, veg.astype(numpy.int8))
         console.log(f"Successfuly created mask: {out_filename}")
         cnt += 1
-    img_dict[key].close()
+    dataset.close()
     console.log(f"[yellow]Finished process: Vegetation mask")
 
 
 # @profile
-def calc_succession():
+def analyse_succession():
     time.sleep(1)
     console.log(f"[yellow]Start process: Succession mask")
-    path_dict = {}
-    veg_path = os.path.join(OUTPUT_PATH, "veg")
-    for f in os.listdir(veg_path):
-        if os.path.isfile(os.path.join(veg_path, f)):
-            path_file = os.path.join(veg_path, f)
-            try:
-                year = int(re.search(r"\d+", f).group())
-            except:
-                continue
-            path_dict.update({year: path_file})
-    path_dict = dict(sorted(path_dict.items()))
-    com = f"cp {list(path_dict.values())[1]} {DIFF_OUTPUT}"
-    os.system(com)
+    path_dict = load_tiff(OUTPUT_PATH_VEG)
+    os.system(f"cp {list(path_dict.values())[1]} {DIFF_OUTPUT}")
     # add all veg mask except first (oldest)
     for i in range(1, len(path_dict) - 1):
         path_1 = DIFF_OUTPUT
         path_2 = list(path_dict.values())[i + 1]
         with rioxarray.open_rasterio(
             path_1, masked=True
-        ) as xds, rioxarray.open_rasterio(path_2, masked=True) as xds_match:
+        ) as succ_ras, rioxarray.open_rasterio(path_2, masked=True) as veg_match:
             # reproject raster 2 onto 1
-            xds_repr_match = xds.rio.reproject_match(xds_match)
-            xds_add = xds_repr_match + xds_match  # sum up rasters
+            succ_repr_match = succ_ras.rio.reproject_match(veg_match)
+            raster_sum = succ_repr_match + veg_match  # sum up rasters
 
-            del xds_match, xds_repr_match
+            del veg_match, succ_repr_match
             gc.collect()
 
-            xds_add.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
+            raster_sum.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
 
-            del xds_add
+            del raster_sum
             gc.collect()
 
     path_2 = list(path_dict.values())[0]
-    with rioxarray.open_rasterio(path_1, masked=True) as xds, rioxarray.open_rasterio(
-        path_2, masked=True
-    ) as xds_match:
+    with rioxarray.open_rasterio(
+        path_1, masked=True
+    ) as succ_ras, rioxarray.open_rasterio(path_2, masked=True) as veg_match:
         # reproject raster 2 onto 1
-        xds_repr_match = xds.rio.reproject_match(xds_match)
+        succ_repr_match = succ_ras.rio.reproject_match(veg_match)
 
-        xds_add = xds_match * xds_repr_match
+        raster_product = veg_match * succ_repr_match
 
-        del xds_match, xds_repr_match
+        del veg_match, succ_repr_match
         gc.collect()
-        xds_add.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
+        raster_product.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
 
-        del xds_add
+        del raster_product
         gc.collect()
     console.log(f"[yellow]Finished process: Succession mask")
 
@@ -248,8 +237,8 @@ if __name__ == "__main__":
     console.log("[blue bold]>>--<Program Start>--<<")
     T_start = time.time()
 
-    ndvi_mask(NDVI_THRESHOLD, 0.5)
-    calc_succession()
+    creat_veg_raster(NDVI_THRESHOLD, 0.5)
+    analyse_succession()
     # opening_img(DIFF_OUTPUT, 10)
     raster_to_shape(DIFF_OUTPUT)
     T_end = time.time()

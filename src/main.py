@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+import argparse
 import time
 import re
 import rasterio
@@ -8,23 +11,60 @@ import numpy
 import os
 import cv2
 import gc
-from memory_profiler import profile
-
 import geopandas
-
 from rich.console import Console
+
+# from memory_profiler import profile
 
 console = Console()
 
-INPUT_PATH = "./input/"
-OUTPUT_PATH = "./output/"
-OUTPUT_PATH_VEG = OUTPUT_PATH + "veg"
-DIFF_OUTPUT = OUTPUT_PATH + "veg_diff.tif"
-
-NDVI_THRESHOLD = 0.3
+NDVI_THRESHOLD = 0.5
 KERNEL_SIZE = 2
 GSD = 1.0  # 1m/px
 numpy.seterr(divide="ignore", invalid="ignore")
+
+
+def dir_path(path_string):
+    if os.path.isdir(path_string):
+        return path_string
+    else:
+        console.log(f'[red] "{path_string}" not a valid path')
+        exit()
+
+
+parser = argparse.ArgumentParser(
+    description="Tool to detect ecological succsession in a set of CIR-Orthoimages"
+)
+parser.add_argument(
+    "-i", "-input", dest="in_path", help="Input Path", type=dir_path, required=True
+)
+parser.add_argument(
+    "-o",
+    "-output",
+    dest="out_path",
+    help="Output path",
+    type=dir_path,
+    required=True,
+)
+parser.add_argument(
+    "-gsd", type=float, help="Ground Sample Distance in meter per pixel", default=GSD
+)
+parser.add_argument(
+    "-th",
+    type=float,
+    help="Vegetation Threshold. Range -1.0 to 1.0",
+    default=NDVI_THRESHOLD,
+)
+
+args = parser.parse_args()
+
+
+INPUT_PATH = args.in_path
+OUTPUT_PATH = args.out_path
+OUTPUT_PATH_VEG = OUTPUT_PATH + "veg"
+DIFF_OUTPUT = OUTPUT_PATH + "veg_diff.tif"
+NDVI_THRESHOLD = args.th
+GSD = args.gsd
 
 
 def load_tiff(input_path):
@@ -234,10 +274,17 @@ def analyse_succession():
 
 
 if __name__ == "__main__":
+    if NDVI_THRESHOLD > 1 or NDVI_THRESHOLD < -1:
+        console.log(
+            f"[red] NDVI threshold out of range. Must be between -1.0 and 1.0. Your choice: {NDVI_THRESHOLD}"
+        )
+        exit()
     console.log("[blue bold]>>--<Program Start>--<<")
+    console.log(f"[blue] GSD:{GSD} m/px | Threshold:{NDVI_THRESHOLD}")
+
     T_start = time.time()
 
-    creat_veg_raster(NDVI_THRESHOLD, 0.5)
+    creat_veg_raster(NDVI_THRESHOLD, GSD)
     analyse_succession()
     # opening_img(DIFF_OUTPUT, 10)
     raster_to_shape(DIFF_OUTPUT)

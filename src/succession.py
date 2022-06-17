@@ -33,7 +33,7 @@ def dir_path(path_string):
 
 
 parser = argparse.ArgumentParser(
-    description="Tool to detect ecological succsession in a set of CIR-Orthoimages"
+    description="Tool to detect ecological succession in a set of CIR-Orthoimages"
 )
 parser.add_argument(
     "-i", "-input", dest="in_path", help="Input Path", type=dir_path, required=True

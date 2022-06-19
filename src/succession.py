@@ -43,7 +43,7 @@ parser.add_argument(
     "-output",
     dest="out_path",
     help="Output path",
-    type=dir_path,
+    type=str,
     required=True,
 )
 parser.add_argument(
@@ -58,13 +58,41 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-
+# set gloabal variables
 INPUT_PATH = args.in_path
-OUTPUT_PATH = args.out_path
-OUTPUT_PATH_VEG = OUTPUT_PATH + "veg"
-DIFF_OUTPUT = OUTPUT_PATH + "veg_diff.tif"
+OUTPUT_PATH = os.path.abspath(args.out_path)
+OUTPUT_PATH_VEG = os.path.join(OUTPUT_PATH, "veg")
+OUTPUT_PATH_NDVI = os.path.join(OUTPUT_PATH, "ndvi")
+DIFF_OUTPUT = os.path.join(OUTPUT_PATH, "veg_diff.tif")
 NDVI_THRESHOLD = args.th
 GSD = args.gsd
+
+# create output directory structure
+def create_out_diectory(path):
+    try:
+        os.makedirs(path)
+        console.log(f"Create Path: {path}")
+    except FileExistsError:
+        console.log(f"Path already exists: {path}")
+    pass
+
+
+def get_dir_size(path):
+    total_size = 0
+    for elm in os.scandir(path):
+        if elm.is_file():
+            total_size += os.path.getsize(elm)
+        elif elm.is_dir():
+            total_size += get_dir_size(elm.path)
+    return total_size
+
+
+def sizeof_fmt(num, suffix="B"):
+    for unit in ["", "K", "M", "G", "T", "P", "E", "Z"]:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f} {unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
 
 
 def load_tiff(input_path):
@@ -110,7 +138,9 @@ def raster_to_shape(path_to_file):
         # result_gdf = veg_gdf.simplify(1)
         out_p = os.path.join(OUTPUT_PATH, "mask_shape.geojson")
     result_gdf.to_file(out_p, driver="GeoJSON")
-    console.log(f"sucsessfully created GeoJSON Shape: {out_p}")
+    console.log(
+        f"Sucsessfully created GeoJSON Shape: {out_p} [blue]{sizeof_fmt(os.path.getsize(out_p))}"
+    )
 
 
 def morph_img(image, kernel_pxSize):
@@ -192,11 +222,12 @@ def creat_veg_raster(threshold=0.5, gsd=0.5):
             ndvi = (bandNIR - bandRed) / (bandNIR + bandRed)
 
             # print(ndvi.max(), ndvi.min())
-            with rasterio.open(
-                os.path.join(OUTPUT_PATH, "ndvi", f"ndvi_{key}.tif"), "w", **kwargs
-            ) as dst:
+            ndvi_out_path = os.path.join(OUTPUT_PATH_NDVI, f"ndvi_{key}.tif")
+            with rasterio.open(ndvi_out_path, "w", **kwargs) as dst:
                 dst.write_band(1, ndvi)
-
+        console.log(
+            f"Successfuly created mask: {ndvi_out_path} [blue]{sizeof_fmt(os.path.getsize(ndvi_out_path))}"
+        )
         with console.status(
             f"[green]Creating Vegetation mask for {dataset.name} - {cnt} of {len(img_dict)}"
         ) as status:
@@ -209,10 +240,12 @@ def creat_veg_raster(threshold=0.5, gsd=0.5):
             if cnt == 1:
                 veg = numpy.logical_not(veg)
                 pass
-            out_filename = os.path.join(OUTPUT_PATH_VEG, f"veg_{key}.tif")
-            with rasterio.open(out_filename, "w", **kwargs) as dst:
+            veg_out_path = os.path.join(OUTPUT_PATH_VEG, f"veg_{key}.tif")
+            with rasterio.open(veg_out_path, "w", **kwargs) as dst:
                 dst.write_band(1, veg.astype(numpy.int8))
-        console.log(f"Successfuly created mask: {out_filename}")
+        console.log(
+            f"Successfuly created mask: {veg_out_path} [blue]{sizeof_fmt(os.path.getsize(veg_out_path))}"
+        )
         cnt += 1
     dataset.close()
     console.log(f"[yellow]Finished process: Vegetation mask")
@@ -257,24 +290,31 @@ def analyse_succession():
         morph_img(DIFF_OUTPUT, 1 / GSD)
         del raster_product
         gc.collect()
+        console.log(
+            f"Successfuly created succession raster: {path_1} [blue]{sizeof_fmt(os.path.getsize(path_1))}"
+        )
     console.log(f"[yellow]Finished process: Succession mask")
 
 
 if __name__ == "__main__":
     if NDVI_THRESHOLD > 1 or NDVI_THRESHOLD < -1:
         console.log(
-            f"[red] NDVI threshold out of range. Must be between -1.0 and 1.0. Your choice: {NDVI_THRESHOLD}"
+            f"[red] NDVI threshold out of range. Must be between -1.0 and 1.0. Your choice was: {NDVI_THRESHOLD}"
         )
         exit()
-    console.log("[blue bold]>>--<Program Start>--<<")
+    console.log("[green bold]>>--<Program Start>--<<")
     console.log(f"[blue] GSD:{GSD} m/px | Threshold:{NDVI_THRESHOLD}")
 
     T_start = time.time()
-
+    create_out_diectory(OUTPUT_PATH_NDVI)
+    create_out_diectory(OUTPUT_PATH_VEG)
     creat_veg_raster(NDVI_THRESHOLD, GSD)
     analyse_succession()
     raster_to_shape(DIFF_OUTPUT)
     T_end = time.time()
     t = time.strftime("%M:%S", time.gmtime(T_end - T_start))
-    console.log(f"[blue bold]Duration: {t}")
+
+    console.log(
+        f"[blue bold]Duration: {t} | Output folder size [blue]{sizeof_fmt(get_dir_size(OUTPUT_PATH))}"
+    )
     pass

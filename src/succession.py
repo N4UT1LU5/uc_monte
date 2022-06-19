@@ -113,42 +113,30 @@ def raster_to_shape(path_to_file):
     console.log(f"sucsessfully created GeoJSON Shape: {out_p}")
 
 
-def morph_img(img, kernel_pxSize):
-    kernel_pxSize = int(kernel_pxSize)
-    img = img.astype(numpy.uint8)
-    img = cv2.morphologyEx(
-        img,
-        cv2.MORPH_CLOSE,
-        kernel=numpy.ones((kernel_pxSize, kernel_pxSize), numpy.uint8),
-    )
-    img = cv2.morphologyEx(
-        img,
-        cv2.MORPH_OPEN,
-        kernel=numpy.ones(
-            (int(kernel_pxSize * 1.2), int(kernel_pxSize * 1.2)), numpy.uint8
-        ),
-    )
-    return img
-
-
-# test. not in use
-def opening_img(path_to_file, kernel_pxSize):
-    # https://www.geeksforgeeks.org/erosion-dilation-images-using-opencv-python/
-    with rasterio.open(path_to_file, "r+") as dst:
-        img = dst.read(1).astype(numpy.uint8)
+def morph_img(image, kernel_pxSize):
+    def cvmorph(img, kernel):
+        kernel = int(kernel)
+        img = img.astype(numpy.uint8)
         img = cv2.morphologyEx(
             img,
             cv2.MORPH_CLOSE,
-            kernel=numpy.ones((kernel_pxSize, kernel_pxSize), numpy.uint8),
+            kernel=numpy.ones((kernel, kernel), numpy.uint8),
         )
         img = cv2.morphologyEx(
             img,
             cv2.MORPH_OPEN,
-            kernel=numpy.ones((kernel_pxSize + 5, kernel_pxSize + 5), numpy.uint8),
+            kernel=numpy.ones((int(kernel * 1.2), int(kernel * 1.2)), numpy.uint8),
         )
+        return img
 
-    with rasterio.open(OUTPUT_PATH + "erosion.tif", "r+", compress="lzw") as dst2:
-        dst2.write_band(1, img)
+    if os.path.exists(image):
+        with rasterio.open(image, "r+") as dst:
+            image = dst.read(1).astype(numpy.uint8)
+            image = cvmorph(image, kernel_pxSize)
+            dst.write_band(1, image)
+            return
+    else:
+        return cvmorph(image, kernel_pxSize)
 
 
 # @profile
@@ -261,13 +249,12 @@ def analyse_succession():
     ) as succ_ras, rioxarray.open_rasterio(path_2, masked=True) as veg_match:
         # reproject raster 2 onto 1
         succ_repr_match = succ_ras.rio.reproject_match(veg_match)
-
         raster_product = veg_match * succ_repr_match
 
         del veg_match, succ_repr_match
         gc.collect()
         raster_product.rio.to_raster(DIFF_OUTPUT, dtype=numpy.int8, compress="lzw")
-
+        morph_img(DIFF_OUTPUT, 1 / GSD)
         del raster_product
         gc.collect()
     console.log(f"[yellow]Finished process: Succession mask")
@@ -286,7 +273,6 @@ if __name__ == "__main__":
 
     creat_veg_raster(NDVI_THRESHOLD, GSD)
     analyse_succession()
-    # opening_img(DIFF_OUTPUT, 10)
     raster_to_shape(DIFF_OUTPUT)
     T_end = time.time()
     t = time.strftime("%M:%S", time.gmtime(T_end - T_start))

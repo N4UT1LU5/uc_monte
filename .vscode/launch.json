@@ -5,13 +5,22 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Current File",
+            "name": "gsd 0.2 th 0.4",
             "type": "python",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
             "justMyCode": true,
             "args": ["-i", "~/uc_monte/input/", "-o", "~/uc_monte/output/", "-gsd", "0.2", "-th", "0.4"]
+        },
+        {
+            "name": "gsd 0.2 th 0.5",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["-i", "~/uc_monte/input/", "-o", "~/uc_monte/output/", "-gsd", "0.2", "-th", "0.5"]
         }
     ]
 }
